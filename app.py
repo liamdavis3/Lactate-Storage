@@ -94,7 +94,7 @@ def load_tests(user_id):
     """Every test (one row each) with its workout's info, as a pandas table, oldest first."""
     with db() as conn:
         return pd.read_sql_query(
-            """SELECT w.date, t.rep_number, t.distance_m, t.pace_sec_per_mile, t.hr, t.lactate,
+            """SELECT w.id AS workout_id, w.date, t.rep_number, t.distance_m, t.pace_sec_per_mile, t.hr, t.lactate,
                       w.reps, w.grade_pct, w.rpe, w.sleep_hours
                FROM tests t JOIN workouts w ON t.workout_id = w.id
                WHERE w.user_id = ?
@@ -150,7 +150,17 @@ def threshold_hr(params):
     return float(np.log((THRESHOLD_MMOL - a) / b) / c)
 
 
-def make_figure(df):
+# Dropdown choice -> (column to color by, colorbar label). "Date" is worked out in make_figure.
+COLOR_OPTIONS = {
+    "Date": (None, "Days since first test"),
+    "RPE": ("rpe", "RPE"),
+    "Pace": ("pace_sec_per_mile", "Pace (sec/mile)"),
+    "Sleep": ("sleep_hours", "Sleep (hours)"),
+    "None": (None, None),
+}
+
+
+def make_figure(df, color_by="Date"):
     """Build the matplotlib chart. Returns (figure, text describing the result)."""
     fig = Figure(figsize=(7, 4.5))
     ax = fig.add_subplot(111)
@@ -162,7 +172,18 @@ def make_figure(df):
     if df.empty:
         return fig, "No tests yet. Add a workout first."
 
-    ax.scatter(df["hr"], df["lactate"], label="Tests", zorder=3)
+    # Color the points by the chosen column (or by date, or not at all)
+    column, color_label = COLOR_OPTIONS[color_by]
+    if color_by == "Date":
+        dates = pd.to_datetime(df["date"])
+        values = (dates - dates.min()).dt.days
+    elif column:
+        values = df[column]
+    if color_label:
+        points = ax.scatter(df["hr"], df["lactate"], c=values, cmap="viridis", label="Tests", zorder=3)
+        fig.colorbar(points, ax=ax, label=color_label)
+    else:
+        ax.scatter(df["hr"], df["lactate"], label="Tests", zorder=3)
     params = fit_curve(df)
     if params is None:
         return fig, f"{len(df)} test(s). Need 4+ at different HRs to draw a curve."
@@ -242,10 +263,16 @@ class App(tk.Tk):
         ttk.Button(self, text="< Back to menu", command=self.show_menu).pack(anchor="w", padx=10, pady=10)
 
     # ---- visualize curve
-    def show_curve(self):
+    def show_curve(self, color_by="Date"):
         self.clear()
         self.back_button()
-        fig, message = make_figure(load_tests(self.user_id))
+        # Dropdown: picking a new option redraws this screen with that coloring
+        picker = ttk.Combobox(self, values=list(COLOR_OPTIONS), state="readonly", width=8)
+        picker.set(color_by)
+        picker.bind("<<ComboboxSelected>>", lambda event: self.show_curve(picker.get()))
+        ttk.Label(self, text="Color points by:").pack()
+        picker.pack()
+        fig, message = make_figure(load_tests(self.user_id), color_by)
         ttk.Label(self, text=message, font=("", 13)).pack()
         canvas = FigureCanvasTkAgg(fig, master=self)
         canvas.draw()
@@ -350,9 +377,32 @@ class App(tk.Tk):
             table.column(col, width=70, anchor="center")
         df = load_tests(self.user_id)
         df["pace"] = df["pace_sec_per_mile"].apply(format_pace)
+        workout_of_row = {}  # table row -> the workout it belongs to
         for _, row in df.iloc[::-1].iterrows():  # newest first
-            table.insert("", "end", values=[row[c] for c in columns])
+            item = table.insert("", "end", values=[row[c] for c in columns])
+            workout_of_row[item] = int(row["workout_id"])
         table.pack(fill="both", expand=True, padx=10, pady=10)
+
+        def delete_selected():
+            selected = table.selection()
+            if not selected:
+                return
+            workout_id = workout_of_row[selected[0]]
+            n_tests = list(workout_of_row.values()).count(workout_id)
+            if not messagebox.askyesno(
+                "Delete", f"Delete this whole workout and all {n_tests} of its test(s)?"
+            ):
+                return
+            with db() as conn:
+                # only delete if the workout belongs to the logged-in user
+                conn.execute(
+                    "DELETE FROM tests WHERE workout_id IN (SELECT id FROM workouts WHERE id = ? AND user_id = ?)",
+                    (workout_id, self.user_id),
+                )
+                conn.execute("DELETE FROM workouts WHERE id = ? AND user_id = ?", (workout_id, self.user_id))
+            self.show_past()  # refresh the table
+
+        ttk.Button(self, text="Delete selected workout", command=delete_selected).pack(pady=(0, 10))
 
 
 if __name__ == "__main__":
