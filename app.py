@@ -40,7 +40,8 @@ def setup_database():
             user_id INTEGER NOT NULL,
             date TEXT NOT NULL,
             reps INTEGER NOT NULL,
-            distance_m REAL NOT NULL,
+            rep_unit TEXT NOT NULL,
+            rep_length REAL NOT NULL,
             grade_pct REAL NOT NULL,
             rpe REAL NOT NULL,
             sleep_hours REAL NOT NULL)""")
@@ -49,7 +50,7 @@ def setup_database():
             id INTEGER PRIMARY KEY,
             workout_id INTEGER NOT NULL,
             rep_number INTEGER NOT NULL,
-            distance_m REAL NOT NULL,
+            rep_length REAL NOT NULL,
             pace_sec_per_mile REAL NOT NULL,
             hr REAL NOT NULL,
             lactate REAL NOT NULL)""")
@@ -94,8 +95,8 @@ def load_tests(user_id):
     """Every test (one row each) with its workout's info, as a pandas table, oldest first."""
     with db() as conn:
         return pd.read_sql_query(
-            """SELECT w.id AS workout_id, w.date, t.rep_number, t.distance_m, t.pace_sec_per_mile, t.hr, t.lactate,
-                      w.reps, w.grade_pct, w.rpe, w.sleep_hours
+            """SELECT w.id AS workout_id, w.date, t.rep_number, t.rep_length, t.pace_sec_per_mile, t.hr, t.lactate,
+                      w.reps, w.rep_unit, w.grade_pct, w.rpe, w.sleep_hours
                FROM tests t JOIN workouts w ON t.workout_id = w.id
                WHERE w.user_id = ?
                ORDER BY w.date, w.id, t.rep_number""",
@@ -295,20 +296,41 @@ class App(tk.Tk):
             ("Sleep last night (hours)", ""),
         ]
         entries = []
+        labels = []
         for row, (label, default) in enumerate(fields):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="e", pady=2)
+            label_widget = ttk.Label(frame, text=label)
+            label_widget.grid(row=row, column=0, sticky="e", pady=2)
+            labels.append(label_widget)
             entry = ttk.Entry(frame)
             entry.insert(0, default)
             entry.grid(row=row, column=1, pady=2, padx=8)
             entries.append(entry)
 
+        # --- is each rep a distance (m) or a time (min)?
+        rep_unit = tk.StringVar(value="m")
+        unit_frame = ttk.Frame(frame)
+        unit_frame.grid(row=len(fields), columnspan=2, pady=(8, 0))
+        ttk.Label(unit_frame, text="Reps are measured by:").pack(side="left", padx=5)
+        ttk.Radiobutton(unit_frame, text="Distance (m)", variable=rep_unit, value="m").pack(side="left")
+        ttk.Radiobutton(unit_frame, text="Time (min)", variable=rep_unit, value="min").pack(side="left")
+
         # --- tests (1 or more per workout): one row of boxes per test
         ttk.Label(frame, text="Tests (lactate taken after a rep)", font=("", 13)).grid(
-            row=len(fields), columnspan=2, pady=(15, 2))
+            row=len(fields) + 1, columnspan=2, pady=(15, 2))
         tests_frame = ttk.Frame(frame)
-        tests_frame.grid(row=len(fields) + 1, columnspan=2)
+        tests_frame.grid(row=len(fields) + 2, columnspan=2)
+        test_headers = []
         for col, name in enumerate(["Rep #", "Distance (m)", "Pace (m:ss/mi)", "HR (bpm)", "Lactate"]):
-            ttk.Label(tests_frame, text=name).grid(row=0, column=col)
+            header = ttk.Label(tests_frame, text=name)
+            header.grid(row=0, column=col)
+            test_headers.append(header)
+
+        def update_unit_labels(*args):
+            by_distance = rep_unit.get() == "m"
+            labels[2].config(text="Distance per rep (m)" if by_distance else "Time per rep (min)")
+            test_headers[1].config(text="Distance (m)" if by_distance else "Time (min)")
+
+        rep_unit.trace_add("write", update_unit_labels)
         test_rows = []  # each item is a list of 5 entry boxes
 
         def add_test_row():
@@ -318,12 +340,12 @@ class App(tk.Tk):
                 box = ttk.Entry(tests_frame, width=13)
                 box.grid(row=row, column=col, padx=2, pady=2)
                 boxes.append(box)
-            boxes[1].insert(0, entries[2].get())  # prefill distance from the workout's rep distance
+            boxes[1].insert(0, entries[2].get())  # prefill from the workout's rep length
             test_rows.append(boxes)
 
         add_test_row()
         ttk.Button(frame, text="+ Add another test", command=add_test_row).grid(
-            row=len(fields) + 2, columnspan=2, pady=5)
+            row=len(fields) + 3, columnspan=2, pady=5)
 
         def save():
             values = [e.get().strip() for e in entries]
@@ -349,27 +371,27 @@ class App(tk.Tk):
                 return
             with db() as conn:
                 cursor = conn.execute(
-                    """INSERT INTO workouts (user_id, date, reps, distance_m, grade_pct, rpe, sleep_hours)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (self.user_id, values[0], int(reps), dist, grade, rpe, sleep),
+                    """INSERT INTO workouts (user_id, date, reps, rep_unit, rep_length, grade_pct, rpe, sleep_hours)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (self.user_id, values[0], int(reps), rep_unit.get(), dist, grade, rpe, sleep),
                 )
                 workout_id = cursor.lastrowid
                 for rep_no, t_dist, pace, hr, lactate in tests:
                     conn.execute(
-                        """INSERT INTO tests (workout_id, rep_number, distance_m, pace_sec_per_mile, hr, lactate)
+                        """INSERT INTO tests (workout_id, rep_number, rep_length, pace_sec_per_mile, hr, lactate)
                            VALUES (?, ?, ?, ?, ?, ?)""",
                         (workout_id, rep_no, t_dist, pace, hr, lactate),
                     )
             messagebox.showinfo("Add workout", f"Saved workout with {len(tests)} test(s)!")
             self.show_menu()
 
-        ttk.Button(frame, text="Save workout", command=save).grid(row=len(fields) + 3, columnspan=2, pady=10)
+        ttk.Button(frame, text="Save workout", command=save).grid(row=len(fields) + 4, columnspan=2, pady=10)
 
     # ---- past workouts (one row per test)
     def show_past(self):
         self.clear()
         self.back_button()
-        columns = ["date", "rep_number", "distance_m", "pace", "hr", "lactate",
+        columns = ["date", "rep_number", "rep", "pace", "hr", "lactate",
                    "reps", "grade_pct", "rpe", "sleep_hours"]
         table = ttk.Treeview(self, columns=columns, show="headings")
         for col in columns:
@@ -377,6 +399,7 @@ class App(tk.Tk):
             table.column(col, width=70, anchor="center")
         df = load_tests(self.user_id)
         df["pace"] = df["pace_sec_per_mile"].apply(format_pace)
+        df["rep"] = [f"{length:g} {unit}" for length, unit in zip(df["rep_length"], df["rep_unit"])]
         workout_of_row = {}  # table row -> the workout it belongs to
         for _, row in df.iloc[::-1].iterrows():  # newest first
             item = table.insert("", "end", values=[row[c] for c in columns])
